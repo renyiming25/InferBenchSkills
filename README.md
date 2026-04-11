@@ -9,9 +9,9 @@
 - 从 HuggingFace Hub 获取热门模型排行。当用户需要了解当前最流行的 AI 模型、为研究或项目寻找热门模型，或根据特定筛选条件（允许的组织、任务类型）获取模型流行度指标的快照时，可以使用此脚本。
 
 筛选条件：
-- 允许的组织：Qwen、zai-org、MiniMax、moonshotai、deepseek-ai、腾讯、字节跳动-Seed
-- 任务类型：图像到文本、文本生成
-- 排除的模型：以 -FP8 或 -GGUF 结尾的模型
+- 允许的组织：Qwen, zai-org, MiniMax, moonshotai, deepseek-ai, tencent, ByteDance-Seed, google
+- 任务类型：Image-Text-to-Text, Text Generation, Any-to-Any
+- 排除的模型：以 -GGUF、int4 结尾的模型
 
 
 ## model-download
