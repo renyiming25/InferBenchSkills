@@ -363,10 +363,11 @@ class SGLangServer:
 class BenchmarkRunner:
     """基准测试运行器"""
 
-    def __init__(self, port: int, max_tokens: int = DEFAULT_MAX_TOKENS, thinking_mode: Optional[str] = None):
+    def __init__(self, port: int, max_tokens: int = DEFAULT_MAX_TOKENS, thinking_mode: Optional[str] = None, temperature: float = 1.0):
         self.port = port
         self.max_tokens = max_tokens
         self.thinking_mode = thinking_mode
+        self.temperature = temperature
         self.benchmark_log_dir = Path(DEFAULT_LOG_DIR) / "benchmarks"
         self.benchmark_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -381,6 +382,7 @@ class BenchmarkRunner:
             "--num-examples", str(num_examples),
             "--max-tokens", str(self.max_tokens),
             "--repeat", "1",
+            "--temperature", str(self.temperature),
         ]
 
         if self.thinking_mode:
@@ -408,6 +410,7 @@ class BenchmarkRunner:
             "--port", str(self.port),
             "--num-examples", str(num_examples),
             "--max-tokens", str(self.max_tokens),
+            "--temperature", str(self.temperature),
         ]
 
         result = self._run_command(cmd, "MMLU")
@@ -458,6 +461,7 @@ class BenchmarkRunner:
             "--eval-name", "humaneval",
             "--port", str(self.port),
             "--num-examples", str(num_examples),
+            "--temperature", str(self.temperature),
         ]
 
         result = self._run_command(cmd, "HumanEval")
@@ -611,10 +615,11 @@ class BenchmarkRunner:
             return None
 
         patterns = [
-            r"accuracy[:\s]+([0-9.]+)",
-            r"Accuracy[:\s]+([0-9.]+)",
+            r"score[:\s=]+([0-9.]+)",  # SGLang 输出格式: score=0.1616
+            r"accuracy[:\s=]+([0-9.]+)",
+            r"Accuracy[:\s=]+([0-9.]+)",
             r"([\d.]+)%\s*(?:accuracy|correct)",
-            r"pass@1[:\s]+([0-9.]+)",
+            r"pass@1[:\s=]+([0-9.]+)",
         ]
 
         for pattern in patterns:
@@ -759,7 +764,8 @@ class ModelEvaluator:
             runner = BenchmarkRunner(
                 self.args.port,
                 max_tokens=self.args.max_tokens,
-                thinking_mode=self.args.thinking_mode
+                thinking_mode=self.args.thinking_mode,
+                temperature=self.args.temperature
             )
 
             # 解析样本数配置
@@ -1089,6 +1095,13 @@ def main():
         type=int,
         default=DEFAULT_MAX_TOKENS,
         help=f"评估时最大 token 数 (默认: {DEFAULT_MAX_TOKENS})"
+    )
+
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="生成温度参数 (默认: 1.0)"
     )
 
     args = parser.parse_args()
