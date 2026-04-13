@@ -546,6 +546,7 @@ class BenchmarkRunner:
     def _run_command(self, cmd: List[str], name: str, timeout: int = 3600) -> str:
         """运行命令并返回输出（后台执行，完整日志记录，错误立即上报）"""
         log.log_command(cmd)
+        cmd = list(map(str, cmd))
 
         # 创建日志文件路径
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
