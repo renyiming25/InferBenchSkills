@@ -25,6 +25,7 @@ DEFAULT_PORT = 30000
 DEFAULT_TP = 1
 DEFAULT_MEM_FRACTION = 0.8
 DEFAULT_MAX_TOKENS = 32768
+DEFAULT_TEMPERATURE = 1.0
 DEFAULT_REPORT_DIR = "/workspace/eval_reports"
 DEFAULT_LOG_DIR = "/workspace/eval_logs"
 DEFAULT_MODEL_DIR = "/workspace/models"
@@ -41,8 +42,15 @@ DEFAULT_NUM_EXAMPLES = {
 # 性能测试默认配置
 PERF_TEST_CONFIG = {
     "latency": {"num_prompts": 10, "concurrency": 1},
-    "throughput": {"num_prompts": 500, "concurrency": 100},
+    "throughput": {"num_prompts": 500, "concurrency": 30},  # 默认并发改为30
 }
+
+# 多并发测试级别
+DEFAULT_CONCURRENCY_LEVELS = [10, 20, 30]
+
+# 性能测试默认输入输出长度
+DEFAULT_RANDOM_INPUT_LEN = 32000
+DEFAULT_RANDOM_OUTPUT_LEN = 500
 
 
 class Logger:
@@ -285,6 +293,7 @@ class SGLangServer:
             "--port", str(self.port),
             "--tp", str(self.tp),
             "--mem-fraction-static", str(self.mem_fraction),
+            "--disable-radix-cache",  # 默认禁用 radix cache
         ]
         log.log_command(cmd)
 
@@ -363,17 +372,19 @@ class SGLangServer:
 class BenchmarkRunner:
     """基准测试运行器"""
 
-    def __init__(self, port: int, max_tokens: int = DEFAULT_MAX_TOKENS, thinking_mode: Optional[str] = None, temperature: float = 1.0):
+    def __init__(self, port: int, max_tokens: int = DEFAULT_MAX_TOKENS, temperature: float = DEFAULT_TEMPERATURE, thinking_mode: Optional[str] = None, random_input_len: int = DEFAULT_RANDOM_INPUT_LEN, random_output_len: int = DEFAULT_RANDOM_OUTPUT_LEN):
         self.port = port
         self.max_tokens = max_tokens
-        self.thinking_mode = thinking_mode
         self.temperature = temperature
+        self.thinking_mode = thinking_mode
+        self.random_input_len = random_input_len
+        self.random_output_len = random_output_len
         self.benchmark_log_dir = Path(DEFAULT_LOG_DIR) / "benchmarks"
         self.benchmark_log_dir.mkdir(parents=True, exist_ok=True)
 
     def run_gpqa(self, num_examples: int) -> Dict[str, Any]:
         """运行 GPQA 测试"""
-        log.info(f"[GPQA] 运行测试 ({num_examples} samples, max_tokens={self.max_tokens})...")
+        log.info(f"[GPQA] 运行测试 ({num_examples} samples, max_tokens={self.max_tokens}, temperature={self.temperature})...")
 
         cmd = [
             "python", "-m", "sglang.test.run_eval",
@@ -381,14 +392,15 @@ class BenchmarkRunner:
             "--port", str(self.port),
             "--num-examples", str(num_examples),
             "--max-tokens", str(self.max_tokens),
-            "--repeat", "1",
             "--temperature", str(self.temperature),
+            "--repeat", "1",
         ]
 
         if self.thinking_mode:
             cmd.extend(["--thinking-mode", self.thinking_mode])
 
-        result = self._run_command(cmd, "GPQA")
+        log_file = self._run_command(cmd, "GPQA")
+        result = self._read_log_file(log_file)
         accuracy = self._parse_accuracy(result)
 
         log.info(f"[GPQA] 完成 - 准确率: {accuracy:.2%}" if accuracy else "[GPQA] 完成 - 未能解析准确率")
@@ -397,12 +409,13 @@ class BenchmarkRunner:
             "accuracy": accuracy,
             "samples": num_examples,
             "max_tokens": self.max_tokens,
-            "raw_output": result[-500:] if result else None,
+            "temperature": self.temperature,
+            "log_file": log_file,
         }
 
     def run_mmlu(self, num_examples: int) -> Dict[str, Any]:
         """运行 MMLU 测试"""
-        log.info(f"[MMLU] 运行测试 ({num_examples} samples, max_tokens={self.max_tokens})...")
+        log.info(f"[MMLU] 运行测试 ({num_examples} samples, max_tokens={self.max_tokens}, temperature={self.temperature})...")
 
         cmd = [
             "python", "-m", "sglang.test.run_eval",
@@ -413,7 +426,8 @@ class BenchmarkRunner:
             "--temperature", str(self.temperature),
         ]
 
-        result = self._run_command(cmd, "MMLU")
+        log_file = self._run_command(cmd, "MMLU")
+        result = self._read_log_file(log_file)
         accuracy = self._parse_accuracy(result)
 
         log.info(f"[MMLU] 完成 - 准确率: {accuracy:.2%}" if accuracy else "[MMLU] 完成 - 未能解析准确率")
@@ -422,7 +436,8 @@ class BenchmarkRunner:
             "accuracy": accuracy,
             "samples": num_examples,
             "max_tokens": self.max_tokens,
-            "raw_output": result[-500:] if result else None,
+            "temperature": self.temperature,
+            "log_file": log_file,
         }
 
     def run_gsm8k(self, num_questions: int, num_shots: int = 5) -> Dict[str, Any]:
@@ -437,7 +452,8 @@ class BenchmarkRunner:
             "--num-shots", str(num_shots),
         ]
 
-        result = self._run_command(cmd, "GSM8K")
+        log_file = self._run_command(cmd, "GSM8K")
+        result = self._read_log_file(log_file)
         accuracy = self._parse_accuracy(result)
 
         log.info(f"[GSM8K] 完成 - 准确率: {accuracy:.2%}" if accuracy else "[GSM8K] 完成 - 未能解析准确率")
@@ -445,7 +461,7 @@ class BenchmarkRunner:
         return {
             "accuracy": accuracy,
             "samples": num_questions,
-            "raw_output": result[-500:] if result else None,
+            "log_file": log_file,
         }
 
     def run_humaneval(self, num_examples: int) -> Dict[str, Any]:
@@ -461,10 +477,10 @@ class BenchmarkRunner:
             "--eval-name", "humaneval",
             "--port", str(self.port),
             "--num-examples", str(num_examples),
-            "--temperature", str(self.temperature),
         ]
 
-        result = self._run_command(cmd, "HumanEval")
+        log_file = self._run_command(cmd, "HumanEval")
+        result = self._read_log_file(log_file)
         accuracy = self._parse_accuracy(result)
 
         log.info(f"[HumanEval] 完成 - 准确率: {accuracy:.2%}" if accuracy else "[HumanEval] 完成 - 未能解析准确率")
@@ -472,35 +488,109 @@ class BenchmarkRunner:
         return {
             "accuracy": accuracy,
             "samples": num_examples,
-            "raw_output": result[-500:] if result else None,
+            "log_file": log_file,
         }
 
     def run_hellaswag(self, num_questions: int, num_shots: int = 20) -> Dict[str, Any]:
-        """运行 HellaSwag 测试"""
+        """运行 HellaSwag 测试 - 直接调用 sglang API"""
         log.info(f"[HellaSwag] 运行测试 ({num_questions} questions)...")
 
-        cmd = [
-            "python", "benchmark/hellaswag/bench_sglang.py",
-            "--host", "127.0.0.1",
-            "--port", str(self.port),
-            "--num-questions", str(num_questions),
-            "--num-shots", str(num_shots),
-        ]
+        import time as time_module
+        import numpy as np
 
-        result = self._run_command(cmd, "HellaSwag")
-        accuracy = self._parse_accuracy(result)
+        try:
+            import sglang as sgl
+            from sglang.lang.backend.runtime_endpoint import RuntimeEndpoint
+            from sglang.utils import download_and_cache_file, read_jsonl
+        except ImportError as e:
+            log.error(f"[HellaSwag] 导入 sglang 失败: {e}")
+            return {"accuracy": 0, "samples": num_questions, "error": str(e)}
 
-        log.info(f"[HellaSwag] 完成 - 准确率: {accuracy:.2%}" if accuracy else "[HellaSwag] 完成 - 未能解析准确率")
+        def get_one_example(lines, i, include_answer):
+            ret = lines[i]["activity_label"] + ": " + lines[i]["ctx"] + " "
+            if include_answer:
+                ret += lines[i]["endings"][lines[i]["label"]]
+            return ret
 
-        return {
-            "accuracy": accuracy,
-            "samples": num_questions,
-            "raw_output": result[-500:] if result else None,
-        }
+        def get_few_shot_examples(lines, k):
+            ret = ""
+            for i in range(k):
+                ret += get_one_example(lines, i, True) + "\n\n"
+            return ret
+
+        log_file = None
+        try:
+            # 连接到已启动的 SGLang 服务器
+            base_url = f"http://127.0.0.1:{self.port}"
+            log.info(f"[HellaSwag] 连接到服务器: {base_url}")
+
+            endpoint = RuntimeEndpoint(base_url)
+            sgl.set_default_backend(endpoint)
+
+            # 下载数据
+            log.info("[HellaSwag] 下载数据集...")
+            url = "https://raw.githubusercontent.com/rowanz/hellaswag/master/data/hellaswag_val.jsonl"
+            filename = download_and_cache_file(url)
+            lines = list(read_jsonl(filename))
+
+            # 限制样本数
+            num_questions = min(num_questions, len(lines))
+            few_shot_examples = get_few_shot_examples(lines, num_shots)
+
+            questions = []
+            choices = []
+            labels = []
+            for i in range(num_questions):
+                questions.append(get_one_example(lines, i, False))
+                choices.append(lines[i]["endings"])
+                labels.append(lines[i]["label"])
+
+            arguments = [{"question": q, "choices": c} for q, c in zip(questions, choices)]
+
+            # 定义 SGL 程序
+            @sgl.function
+            def few_shot_hellaswag(s, question, choices):
+                s += few_shot_examples + question
+                s += sgl.select("answer", choices=choices)
+
+            # 运行测试
+            log.info(f"[HellaSwag] 执行推理 ({num_questions} samples)...")
+            tic = time_module.perf_counter()
+            rets = few_shot_hellaswag.run_batch(
+                arguments,
+                temperature=0,
+                num_threads=64,
+                progress_bar=True,
+                generator_style=False,
+            )
+
+            # 计算准确率
+            preds = []
+            for i, ret in enumerate(rets):
+                preds.append(choices[i].index(ret["answer"]))
+
+            latency = time_module.perf_counter() - tic
+            accuracy = float(np.mean(np.array(preds) == np.array(labels)))
+
+            log.info(f"[HellaSwag] 完成 - 准确率: {accuracy:.2%}, 耗时: {latency:.2f}s")
+
+            return {
+                "accuracy": accuracy,
+                "samples": num_questions,
+                "duration_seconds": latency,
+            }
+
+        except Exception as e:
+            log.error(f"[HellaSwag] 测试失败: {e}")
+            return {
+                "accuracy": 0,
+                "samples": num_questions,
+                "error": str(e),
+            }
 
     def run_latency_test(self, num_prompts: int = 10) -> Dict[str, Any]:
         """运行延迟测试"""
-        log.info(f"[性能] 延迟测试 ({num_prompts} prompts)...")
+        log.info(f"[性能] 延迟测试 ({num_prompts} prompts, input_len={self.random_input_len}, output_len={self.random_output_len})...")
 
         cmd = [
             "python", "-m", "sglang.bench_serving",
@@ -509,9 +599,12 @@ class BenchmarkRunner:
             "--dataset-name", "random",
             "--num-prompts", str(num_prompts),
             "--max-concurrency", "1",
+            "--random-input-len", str(self.random_input_len),
+            "--random-output-len", str(self.random_output_len),
         ]
 
-        result = self._run_command(cmd, "延迟测试")
+        log_file = self._run_command(cmd, "延迟测试")
+        result = self._read_log_file(log_file)
         ttft = self._parse_ttft(result)
 
         log.info(f"[性能] TTFT: {ttft:.2f}ms" if ttft else "[性能] 未能解析 TTFT")
@@ -519,12 +612,14 @@ class BenchmarkRunner:
         return {
             "ttft_ms": ttft,
             "num_prompts": num_prompts,
-            "raw_output": result[-500:] if result else None,
+            "random_input_len": self.random_input_len,
+            "random_output_len": self.random_output_len,
+            "log_file": log_file,
         }
 
     def run_throughput_test(self, num_prompts: int = 500, concurrency: int = 100) -> Dict[str, Any]:
         """运行吞吐量测试"""
-        log.info(f"[性能] 吞吐量测试 ({num_prompts} prompts, concurrency={concurrency})...")
+        log.info(f"[性能] 吞吐量测试 ({num_prompts} prompts, concurrency={concurrency}, input_len={self.random_input_len}, output_len={self.random_output_len})...")
 
         cmd = [
             "python", "-m", "sglang.bench_serving",
@@ -533,28 +628,81 @@ class BenchmarkRunner:
             "--dataset-name", "random",
             "--num-prompts", str(num_prompts),
             "--max-concurrency", str(concurrency),
+            "--random-input-len", str(self.random_input_len),
+            "--random-output-len", str(self.random_output_len),
         ]
 
-        result = self._run_command(cmd, "吞吐量测试")
-        throughput = self._parse_throughput(result)
+        log_file = self._run_command(cmd, "吞吐量测试")
+        result = self._read_log_file(log_file)
 
-        log.info(f"[性能] 吞吐量: {throughput:.2f} tok/s" if throughput else "[性能] 未能解析吞吐量")
+        # 解析各项指标
+        total_throughput = self._parse_total_throughput(result)
+        output_throughput = self._parse_output_throughput(result)
+        input_throughput = self._parse_input_throughput(result)
+        qps = self._parse_qps(result)
+        output_rate = self._parse_mean_tpot(result)  # 吐字速率 (tokens/s)
+
+        # 解析新增指标
+        total_input_tokens = self._parse_total_input_tokens(result)
+        total_output_tokens = self._parse_total_output_tokens(result)
+        successful_requests = self._parse_successful_requests(result)
+        mean_e2e_latency = self._parse_mean_e2e_latency(result)
+
+        # 计算平均输入/输出 tokens
+        avg_input_tokens = None
+        avg_output_tokens = None
+        if successful_requests and successful_requests > 0:
+            if total_input_tokens:
+                avg_input_tokens = total_input_tokens / successful_requests
+            if total_output_tokens:
+                avg_output_tokens = total_output_tokens / successful_requests
+
+        log.info(f"[性能] 总吞吐量: {total_throughput:.2f} tok/s" if total_throughput else "[性能] 未能解析总吞吐量")
+        log.info(f"[性能] 输入吞吐量: {input_throughput:.2f} tok/s" if input_throughput else "")
+        log.info(f"[性能] 输出吞吐量: {output_throughput:.2f} tok/s" if output_throughput else "")
+        log.info(f"[性能] QPS: {qps:.2f} req/s" if qps else "")
+        log.info(f"[性能] 吐字速率: {output_rate:.2f} tok/s" if output_rate else "")
+        log.info(f"[性能] 平均输入 tokens: {avg_input_tokens:.2f}" if avg_input_tokens else "")
+        log.info(f"[性能] 平均输出 tokens: {avg_output_tokens:.2f}" if avg_output_tokens else "")
+        log.info(f"[性能] Mean E2E Latency: {mean_e2e_latency:.2f}ms" if mean_e2e_latency else "")
 
         return {
-            "throughput_tokens_per_sec": throughput,
+            "total_throughput_tokens_per_sec": total_throughput,
+            "input_throughput_tokens_per_sec": input_throughput,
+            "output_throughput_tokens_per_sec": output_throughput,
+            "qps": qps,
+            "output_rate_tokens_per_sec": output_rate,
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
+            "successful_requests": successful_requests,
+            "avg_input_tokens": avg_input_tokens,
+            "avg_output_tokens": avg_output_tokens,
+            "mean_e2e_latency_ms": mean_e2e_latency,
             "num_prompts": num_prompts,
             "concurrency": concurrency,
-            "raw_output": result[-500:] if result else None,
+            "random_input_len": self.random_input_len,
+            "random_output_len": self.random_output_len,
+            "log_file": log_file,
         }
 
     def _run_command(self, cmd: List[str], name: str, timeout: int = 3600) -> str:
-        """运行命令并返回输出（后台执行，完整日志记录，错误立即上报）"""
+        """运行命令并返回日志文件路径（后台执行，完整日志记录，错误立即上报）"""
         log.log_command(cmd)
         cmd = list(map(str, cmd))
 
-        # 创建日志文件路径
+        # 创建日志文件路径 - 使用英文文件名避免编码问题
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_name = name.replace(" ", "_").lower()
+        # 中文名称映射到英文
+        name_map = {
+            "GPQA": "gpqa",
+            "MMLU": "mmlu",
+            "GSM8K": "gsm8k",
+            "HumanEval": "humaneval",
+            "HellaSwag": "hellaswag",
+            "延迟测试": "latency",
+            "吞吐量测试": "throughput",
+        }
+        safe_name = name_map.get(name, name.replace(" ", "_").lower())
         log_file = self.benchmark_log_dir / f"{safe_name}_{timestamp}.log"
 
         log.debug(f"基准测试日志文件: {log_file}")
@@ -578,7 +726,7 @@ class BenchmarkRunner:
                 # 等待进程完成
                 process.wait(timeout=timeout)
 
-            # 读取完整日志输出
+            # 读取完整日志输出用于记录
             with open(log_file, "r") as f:
                 output = f.read()
 
@@ -592,7 +740,8 @@ class BenchmarkRunner:
                 # 立即上报错误到结果
                 raise RuntimeError(error_msg)
 
-            return output
+            # 返回日志文件路径
+            return str(log_file)
 
         except subprocess.TimeoutExpired:
             error_msg = f"[错误] {name} 命令超时 ({timeout}s)"
@@ -608,6 +757,13 @@ class BenchmarkRunner:
             error_msg = f"[错误] {name} 执行失败 - {str(e)}"
             log.error(error_msg)
             raise RuntimeError(error_msg)
+
+    def _read_log_file(self, log_file: str) -> str:
+        """读取日志文件内容"""
+        if not log_file or not Path(log_file).exists():
+            return ""
+        with open(log_file, "r") as f:
+            return f.read()
 
     def _parse_accuracy(self, output: str) -> Optional[float]:
         """从输出中解析准确率"""
@@ -638,6 +794,7 @@ class BenchmarkRunner:
             return None
 
         patterns = [
+            r"Mean TTFT \(ms\):\s*([0-9.]+)",  # SGLang bench_serving 格式
             r"TTFT[:\s]+([0-9.]+)\s*ms",
             r"time to first token[:\s]+([0-9.]+)\s*ms",
             r"mean_ttft_ms[:\s]+([0-9.]+)",
@@ -651,11 +808,12 @@ class BenchmarkRunner:
         return None
 
     def _parse_throughput(self, output: str) -> Optional[float]:
-        """解析吞吐量"""
+        """解析吞吐量（输出token吞吐量）"""
         if not output:
             return None
 
         patterns = [
+            r"Output token throughput \(tok/s\):\s*([0-9.]+)",  # SGLang bench_serving 格式
             r"throughput[:\s]+([0-9.]+)\s*tokens?/s",
             r"output token throughput[:\s]+([0-9.]+)",
             r"total tokens?/s[:\s]+([0-9.]+)",
@@ -666,6 +824,198 @@ class BenchmarkRunner:
             if match:
                 return float(match.group(1))
 
+        return None
+
+    def _parse_total_throughput(self, output: str) -> Optional[float]:
+        """解析总吞吐量（输入+输出token）"""
+        if not output:
+            return None
+
+        patterns = [
+            r"Total token throughput \(tok/s\):\s*([0-9.]+)",  # SGLang bench_serving 格式
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                return float(match.group(1))
+
+        return None
+
+    def _parse_output_throughput(self, output: str) -> Optional[float]:
+        """解析输出token吞吐量"""
+        if not output:
+            return None
+
+        patterns = [
+            r"Output token throughput \(tok/s\):\s*([0-9.]+)",  # SGLang bench_serving 格式
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                return float(match.group(1))
+
+        return None
+
+    def _parse_qps(self, output: str) -> Optional[float]:
+        """解析 QPS (Request throughput)"""
+        if not output:
+            return None
+
+        patterns = [
+            r"Request throughput \(req/s\):\s*([0-9.]+)",  # SGLang bench_serving 格式
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                return float(match.group(1))
+
+        return None
+
+    def _parse_mean_tpot(self, output: str) -> Optional[float]:
+        """解析 Mean TPOT (Time per Output Token) 并转换为吐字速率"""
+        if not output:
+            return None
+
+        patterns = [
+            r"Mean TPOT \(ms\):\s*([0-9.]+)",  # SGLang bench_serving 格式
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                tpot_ms = float(match.group(1))
+                # 转换为吐字速率: 1000 / TPOT(ms) = tokens/s
+                if tpot_ms > 0:
+                    return 1000.0 / tpot_ms
+                return None
+
+        return None
+
+    def _parse_input_throughput(self, output: str) -> Optional[float]:
+        """解析输入token吞吐量"""
+        if not output:
+            return None
+
+        patterns = [
+            r"Input token throughput \(tok/s\):\s*([0-9.]+)",  # SGLang bench_serving 格式
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                return float(match.group(1))
+
+        return None
+
+    def _parse_total_input_tokens(self, output: str) -> Optional[int]:
+        """解析总输入token数"""
+        if not output:
+            return None
+
+        # 尝试从 JSON 格式解析
+        json_value = self._parse_json_field(output, "total_input_tokens")
+        if json_value is not None:
+            return int(json_value)
+
+        # 回退到正则表达式
+        patterns = [
+            r"Total input tokens:\s*([0-9]+)",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+
+        return None
+
+    def _parse_total_output_tokens(self, output: str) -> Optional[int]:
+        """解析总输出token数"""
+        if not output:
+            return None
+
+        # 尝试从 JSON 格式解析
+        json_value = self._parse_json_field(output, "total_output_tokens")
+        if json_value is not None:
+            return int(json_value)
+
+        # 回退到正则表达式
+        patterns = [
+            r"Total generated tokens:\s*([0-9]+)",
+            r"Total output tokens:\s*([0-9]+)",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+
+        return None
+
+    def _parse_successful_requests(self, output: str) -> Optional[int]:
+        """解析成功请求数"""
+        if not output:
+            return None
+
+        # 尝试从 JSON 格式解析 (SGLang 使用 "completed" 字段)
+        json_value = self._parse_json_field(output, "completed")
+        if json_value is not None:
+            return int(json_value)
+
+        # 回退到正则表达式
+        patterns = [
+            r"Successful requests:\s*([0-9]+)",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+
+        return None
+
+    def _parse_mean_e2e_latency(self, output: str) -> Optional[float]:
+        """解析 Mean E2E Latency (ms)"""
+        if not output:
+            return None
+
+        # 尝试从 JSON 格式解析
+        json_value = self._parse_json_field(output, "mean_e2e_latency_ms")
+        if json_value is not None:
+            return float(json_value)
+
+        # 回退到正则表达式
+        patterns = [
+            r"Mean E2E Latency \(ms\):\s*([0-9.]+)",
+            r"E2E Latency \(ms\):\s*([0-9.]+)",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, output, re.IGNORECASE)
+            if match:
+                return float(match.group(1))
+
+        return None
+
+    def _parse_json_field(self, output: str, field_name: str) -> Optional[Any]:
+        """从输出中尝试解析 JSON 并提取字段值"""
+        if not output:
+            return None
+
+        # 尝试找到 JSON 对象（可能在最后一行）
+        lines = output.strip().split('\n')
+        for line in reversed(lines):
+            line = line.strip()
+            if line.startswith('{') and line.endswith('}'):
+                try:
+                    data = json.loads(line)
+                    if field_name in data:
+                        return data[field_name]
+                except json.JSONDecodeError:
+                    continue
         return None
 
 
@@ -743,6 +1093,24 @@ class ModelEvaluator:
 
         return result
 
+    def _parse_concurrency_levels(self, arg: Optional[str]) -> List[int]:
+        """解析并发级别参数"""
+        if not arg:
+            return DEFAULT_CONCURRENCY_LEVELS
+
+        levels = []
+        for item in arg.split(","):
+            item = item.strip()
+            if item:
+                try:
+                    levels.append(int(item))
+                except ValueError:
+                    log.warning(f"无效的并发级别: {item}，已跳过")
+
+        return sorted(levels) if levels else DEFAULT_CONCURRENCY_LEVELS
+
+        return result
+
     def run(self) -> Dict[str, Any]:
         """运行完整评估"""
         server = None
@@ -764,40 +1132,43 @@ class ModelEvaluator:
             runner = BenchmarkRunner(
                 self.args.port,
                 max_tokens=self.args.max_tokens,
+                temperature=self.args.temperature,
                 thinking_mode=self.args.thinking_mode,
-                temperature=self.args.temperature
+                random_input_len=self.args.random_input_len,
+                random_output_len=self.args.random_output_len,
             )
 
             # 解析样本数配置
             num_examples = self._parse_num_examples(self.args.num_examples)
 
             # 运行基准测试
-            benchmarks = [b.strip() for b in self.args.benchmarks.split(",")]
+            if self.args.benchmarks:
+                benchmarks = [b.strip() for b in self.args.benchmarks.split(",") if b.strip()]
 
-            for benchmark in benchmarks:
-                start_time = time.time()
+                for benchmark in benchmarks:
+                    start_time = time.time()
 
-                try:
-                    if benchmark == "gpqa":
-                        result = runner.run_gpqa(num_examples.get("gpqa", 198))
-                    elif benchmark == "mmlu":
-                        result = runner.run_mmlu(num_examples.get("mmlu", 1000))
-                    elif benchmark == "gsm8k":
-                        result = runner.run_gsm8k(num_examples.get("gsm8k", 200))
-                    elif benchmark == "humaneval":
-                        result = runner.run_humaneval(num_examples.get("humaneval", 164))
-                    elif benchmark == "hellaswag":
-                        result = runner.run_hellaswag(num_examples.get("hellaswag", 200))
-                    else:
-                        log.warning(f"未知的基准测试: {benchmark}")
-                        continue
+                    try:
+                        if benchmark == "gpqa":
+                            result = runner.run_gpqa(num_examples.get("gpqa", 198))
+                        elif benchmark == "mmlu":
+                            result = runner.run_mmlu(num_examples.get("mmlu", 1000))
+                        elif benchmark == "gsm8k":
+                            result = runner.run_gsm8k(num_examples.get("gsm8k", 200))
+                        elif benchmark == "humaneval":
+                            result = runner.run_humaneval(num_examples.get("humaneval", 164))
+                        elif benchmark == "hellaswag":
+                            result = runner.run_hellaswag(num_examples.get("hellaswag", 200))
+                        else:
+                            log.warning(f"未知的基准测试: {benchmark}")
+                            continue
 
-                    result["duration_seconds"] = round(time.time() - start_time, 2)
-                    self.results["benchmarks"][benchmark] = result
+                        result["duration_seconds"] = round(time.time() - start_time, 2)
+                        self.results["benchmarks"][benchmark] = result
 
-                except Exception as e:
-                    self.results["errors"].append(f"{benchmark}: {str(e)}")
-                    log.error(f"{benchmark} 测试失败: {e}")
+                    except Exception as e:
+                        self.results["errors"].append(f"{benchmark}: {str(e)}")
+                        log.error(f"{benchmark} 测试失败: {e}")
 
             # 运行性能测试
             if self.args.performance:
@@ -808,12 +1179,32 @@ class ModelEvaluator:
                     self.results["errors"].append(f"延迟测试: {str(e)}")
                     log.error(f"延迟测试失败: {e}")
 
-                try:
-                    throughput_result = runner.run_throughput_test()
-                    self.results["performance"]["throughput"] = throughput_result
-                except Exception as e:
-                    self.results["errors"].append(f"吞吐量测试: {str(e)}")
-                    log.error(f"吞吐量测试失败: {e}")
+                # 判断是否启用多并发测试
+                if getattr(self.args, 'multi_concurrency', False):
+                    # 多并发测试
+                    # 解析并发级别：优先使用用户指定的，否则使用默认值
+                    concurrency_levels = self._parse_concurrency_levels(
+                        getattr(self.args, 'concurrency_levels', None)
+                    )
+                    self.results["performance"]["throughput_multi"] = {}
+
+                    for concurrency in concurrency_levels:
+                        try:
+                            log.info(f"[性能] 开始并发 {concurrency} 的吞吐量测试...")
+                            throughput_result = runner.run_throughput_test(concurrency=concurrency)
+                            self.results["performance"]["throughput_multi"][f"concurrency_{concurrency}"] = throughput_result
+                        except Exception as e:
+                            self.results["errors"].append(f"吞吐量测试(concurrency={concurrency}): {str(e)}")
+                            log.error(f"吞吐量测试(concurrency={concurrency})失败: {e}")
+                else:
+                    # 单并发测试：使用指定的并发数
+                    try:
+                        concurrency = getattr(self.args, 'concurrency', 30)
+                        throughput_result = runner.run_throughput_test(concurrency=concurrency)
+                        self.results["performance"]["throughput"] = throughput_result
+                    except Exception as e:
+                        self.results["errors"].append(f"吞吐量测试: {str(e)}")
+                        log.error(f"吞吐量测试失败: {e}")
 
             self.results["status"] = "success" if not self.results["errors"] else "partial"
 
@@ -842,15 +1233,14 @@ class ModelEvaluator:
         report_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_file = report_dir / f"{self.model_name}_{timestamp}"
 
-        # 根据输出格式生成报告
+        # 根据输出格式生成报告（先确定扩展名，再拼接，避免 with_suffix 截断模型名中的点）
         if self.args.output == "json":
-            report_file = report_file.with_suffix(".json")
+            report_file = report_dir / f"{self.model_name}_{timestamp}.json"
             with open(report_file, "w", encoding="utf-8") as f:
                 json.dump(self.results, f, indent=2, ensure_ascii=False)
         else:
-            report_file = report_file.with_suffix(".md")
+            report_file = report_dir / f"{self.model_name}_{timestamp}.md"
             self._write_markdown_report(report_file)
 
         self.results["report_path"] = str(report_file)
@@ -895,17 +1285,107 @@ class ModelEvaluator:
 
                 if "latency" in perf:
                     lat = perf["latency"]
+                    f.write("### 延迟测试\n\n")
                     ttft = lat.get("ttft_ms")
                     ttft_str = f"{ttft:.2f}ms" if ttft is not None else "N/A"
                     f.write(f"- **TTFT (首Token延迟)**: {ttft_str}\n")
+                    if lat.get("log_file"):
+                        f.write(f"- **详细日志**: {lat['log_file']}\n")
+                    f.write("\n")
 
                 if "throughput" in perf:
                     thr = perf["throughput"]
-                    tps = thr.get("throughput_tokens_per_sec")
-                    tps_str = f"{tps:.2f} tok/s" if tps is not None else "N/A"
-                    f.write(f"- **吞吐量**: {tps_str}\n")
+                    concurrency = thr.get("concurrency", "N/A")
+                    f.write(f"### 吞吐量测试 (并发={concurrency})\n\n")
 
-                f.write("\n")
+                    total_tps = thr.get("total_throughput_tokens_per_sec")
+                    if total_tps is not None:
+                        f.write(f"- **总吞吐量**: {total_tps:.2f} tok/s\n")
+
+                    input_tps = thr.get("input_throughput_tokens_per_sec")
+                    if input_tps is not None:
+                        f.write(f"- **输入吞吐量**: {input_tps:.2f} tok/s\n")
+
+                    output_tps = thr.get("output_throughput_tokens_per_sec")
+                    if output_tps is not None:
+                        f.write(f"- **输出吞吐量**: {output_tps:.2f} tok/s\n")
+
+                    qps = thr.get("qps")
+                    if qps is not None:
+                        f.write(f"- **QPS (请求吞吐量)**: {qps:.2f} req/s\n")
+
+                    output_rate = thr.get("output_rate_tokens_per_sec")
+                    if output_rate is not None:
+                        f.write(f"- **吐字速率**: {output_rate:.2f} tok/s\n")
+
+                    # 新增指标
+                    avg_input_tokens = thr.get("avg_input_tokens")
+                    if avg_input_tokens is not None:
+                        f.write(f"- **平均输入 tokens**: {avg_input_tokens:.2f}\n")
+
+                    avg_output_tokens = thr.get("avg_output_tokens")
+                    if avg_output_tokens is not None:
+                        f.write(f"- **平均输出 tokens**: {avg_output_tokens:.2f}\n")
+
+                    mean_e2e_latency = thr.get("mean_e2e_latency_ms")
+                    if mean_e2e_latency is not None:
+                        f.write(f"- **Mean E2E Latency**: {mean_e2e_latency:.2f}ms\n")
+
+                    if thr.get("log_file"):
+                        f.write(f"- **详细日志**: {thr['log_file']}\n")
+
+                    f.write("\n")
+
+                # 多并发吞吐量测试结果
+                if "throughput_multi" in perf:
+                    f.write("### 多并发吞吐量测试\n\n")
+                    throughput_multi = perf["throughput_multi"]
+
+                    # 汇总表格
+                    f.write("| 并发数 | 总吞吐量 | 输入吞吐量 | 输出吞吐量 | QPS | Mean E2E Latency |\n")
+                    f.write("|--------|----------|------------|------------|-----|------------------|\n")
+
+                    for key in sorted(throughput_multi.keys()):
+                        thr = throughput_multi[key]
+                        concurrency = thr.get("concurrency", "N/A")
+                        total_tps = thr.get("total_throughput_tokens_per_sec")
+                        input_tps = thr.get("input_throughput_tokens_per_sec")
+                        output_tps = thr.get("output_throughput_tokens_per_sec")
+                        qps = thr.get("qps")
+                        mean_e2e = thr.get("mean_e2e_latency_ms")
+
+                        total_str = f"{total_tps:.2f}" if total_tps else "N/A"
+                        input_str = f"{input_tps:.2f}" if input_tps else "N/A"
+                        output_str = f"{output_tps:.2f}" if output_tps else "N/A"
+                        qps_str = f"{qps:.2f}" if qps else "N/A"
+                        e2e_str = f"{mean_e2e:.2f}ms" if mean_e2e else "N/A"
+
+                        f.write(f"| {concurrency} | {total_str} | {input_str} | {output_str} | {qps_str} | {e2e_str} |\n")
+
+                    f.write("\n")
+
+                    # 详细结果
+                    for key in sorted(throughput_multi.keys()):
+                        thr = throughput_multi[key]
+                        concurrency = thr.get("concurrency", "N/A")
+                        f.write(f"#### 并发 {concurrency} 详细结果\n\n")
+
+                        avg_input_tokens = thr.get("avg_input_tokens")
+                        if avg_input_tokens is not None:
+                            f.write(f"- **平均输入 tokens**: {avg_input_tokens:.2f}\n")
+
+                        avg_output_tokens = thr.get("avg_output_tokens")
+                        if avg_output_tokens is not None:
+                            f.write(f"- **平均输出 tokens**: {avg_output_tokens:.2f}\n")
+
+                        output_rate = thr.get("output_rate_tokens_per_sec")
+                        if output_rate is not None:
+                            f.write(f"- **吐字速率**: {output_rate:.2f} tok/s\n")
+
+                        if thr.get("log_file"):
+                            f.write(f"- **详细日志**: {thr['log_file']}\n")
+
+                        f.write("\n")
 
             # 错误信息
             if self.results.get("errors"):
@@ -943,7 +1423,7 @@ def _run_as_daemon(args):
     for key, value in vars(args).items():
         if key == "daemon" or value is None or value is False:
             continue
-        key = key.replace("_", "-")
+        # 保持下划线格式，argparse 使用下划线定义参数
         if isinstance(value, bool) and value:
             cmd.append(f"--{key}")
         else:
@@ -1034,6 +1514,12 @@ def main():
     )
 
     parser.add_argument(
+        "--performance-only",
+        action="store_true",
+        help="仅运行性能测试，跳过所有基准测试"
+    )
+
+    parser.add_argument(
         "--foreground",
         action="store_true",
         help="前台运行模式（默认后台运行）"
@@ -1100,8 +1586,41 @@ def main():
     parser.add_argument(
         "--temperature",
         type=float,
-        default=1.0,
-        help="生成温度参数 (默认: 1.0)"
+        default=DEFAULT_TEMPERATURE,
+        help=f"生成温度 (默认: {DEFAULT_TEMPERATURE})"
+    )
+
+    parser.add_argument(
+        "--random_input_len",
+        type=int,
+        default=DEFAULT_RANDOM_INPUT_LEN,
+        help=f"性能测试随机输入长度 (默认: {DEFAULT_RANDOM_INPUT_LEN})"
+    )
+
+    parser.add_argument(
+        "--random_output_len",
+        type=int,
+        default=DEFAULT_RANDOM_OUTPUT_LEN,
+        help=f"性能测试随机输出长度 (默认: {DEFAULT_RANDOM_OUTPUT_LEN})"
+    )
+
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=30,
+        help="性能测试并发数 (默认: 30)"
+    )
+
+    parser.add_argument(
+        "--multi-concurrency",
+        action="store_true",
+        help="启用多并发测试，默认测试并发 10、20、30 的性能"
+    )
+
+    parser.add_argument(
+        "--concurrency-levels",
+        type=str,
+        help="自定义多并发测试级别，逗号分隔，如: 5,8,10。与 --multi-concurrency 一起使用"
     )
 
     args = parser.parse_args()
@@ -1110,13 +1629,22 @@ def main():
     if args.no_performance:
         args.performance = False
 
+    # 处理 --performance-only：仅运行性能测试
+    if args.performance_only:
+        args.benchmarks = ""
+        args.performance = True
+
     # 处理 --all 参数
     if args.all:
         args.benchmarks = "gpqa,mmlu,gsm8k,humaneval,hellaswag"
 
     # 处理 benchmarks 参数中的 "all"
-    if args.benchmarks.lower() == "all":
+    if args.benchmarks and args.benchmarks.lower() == "all":
         args.benchmarks = "gpqa,mmlu,gsm8k,humaneval,hellaswag"
+
+    # 处理 benchmarks 参数中的 "none" 或空字符串
+    if args.benchmarks and args.benchmarks.lower() == "none":
+        args.benchmarks = ""
 
     # 默认后台运行，除非指定 --foreground
     if not args.foreground:
@@ -1141,7 +1669,7 @@ def main():
     log.log_section("SGLang 模型评估")
     log.info(f"模型输入: {args.model_path if hasattr(args, '_raw_model_path') else args.model_path}")
     log.info(f"模型路径: {args.model_path}")
-    log.info(f"基准测试: {args.benchmarks}")
+    log.info(f"基准测试: {args.benchmarks if args.benchmarks else '无'}")
     log.info(f"性能测试: {'是' if args.performance else '否'}")
     log.info(f"输出格式: {args.output}")
     log.info(f"日志文件: {log.get_log_path()}")
@@ -1167,13 +1695,48 @@ def main():
         log.info("")
         log.info("性能指标:")
         if "latency" in results["performance"]:
-            ttft = results["performance"]["latency"].get("ttft_ms")
+            lat = results["performance"]["latency"]
+            ttft = lat.get("ttft_ms")
             if ttft:
                 log.info(f"  - TTFT: {ttft:.2f}ms")
         if "throughput" in results["performance"]:
-            tps = results["performance"]["throughput"].get("throughput_tokens_per_sec")
-            if tps:
-                log.info(f"  - 吞吐量: {tps:.2f} tok/s")
+            thr = results["performance"]["throughput"]
+            concurrency = thr.get("concurrency", "N/A")
+            log.info(f"  - 吞吐量测试 (并发={concurrency}):")
+            total_tps = thr.get("total_throughput_tokens_per_sec")
+            if total_tps:
+                log.info(f"      总吞吐量: {total_tps:.2f} tok/s")
+            input_tps = thr.get("input_throughput_tokens_per_sec")
+            if input_tps:
+                log.info(f"      输入吞吐量: {input_tps:.2f} tok/s")
+            output_tps = thr.get("output_throughput_tokens_per_sec")
+            if output_tps:
+                log.info(f"      输出吞吐量: {output_tps:.2f} tok/s")
+            qps = thr.get("qps")
+            if qps:
+                log.info(f"      QPS: {qps:.2f} req/s")
+            output_rate = thr.get("output_rate_tokens_per_sec")
+            if output_rate:
+                log.info(f"      吐字速率: {output_rate:.2f} tok/s")
+            avg_input_tokens = thr.get("avg_input_tokens")
+            if avg_input_tokens:
+                log.info(f"      平均输入 tokens: {avg_input_tokens:.2f}")
+            avg_output_tokens = thr.get("avg_output_tokens")
+            if avg_output_tokens:
+                log.info(f"      平均输出 tokens: {avg_output_tokens:.2f}")
+            mean_e2e_latency = thr.get("mean_e2e_latency_ms")
+            if mean_e2e_latency:
+                log.info(f"      Mean E2E Latency: {mean_e2e_latency:.2f}ms")
+        if "throughput_multi" in results["performance"]:
+            log.info("  - 多并发吞吐量测试:")
+            throughput_multi = results["performance"]["throughput_multi"]
+            for key in sorted(throughput_multi.keys()):
+                thr = throughput_multi[key]
+                concurrency = thr.get("concurrency", "N/A")
+                total_tps = thr.get("total_throughput_tokens_per_sec")
+                qps = thr.get("qps")
+                mean_e2e = thr.get("mean_e2e_latency_ms")
+                log.info(f"      并发 {concurrency}: 总吞吐量 {total_tps:.2f} tok/s, QPS {qps:.2f} req/s, E2E {mean_e2e:.2f}ms" if total_tps and qps and mean_e2e else f"      并发 {concurrency}: 数据不完整")
 
     if results.get("errors"):
         log.warning(f"\n错误: {len(results['errors'])} 个")

@@ -19,37 +19,43 @@ description: |
 
 ```bash
 # 默认只运行 GPQA 基准测试（前台运行）
-python3 scripts/eval_model.py --model_path Qwen3.5-0.8B
+python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --foreground
 
-# 后台运行（推荐用于长时间评估任务）
-python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --all --daemon
-
-# 运行全部基准测试
+# 后台运行（推荐用于长时间评估任务，默认后台模式）
 python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --all
 
+# 运行全部基准测试
+python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --all --foreground
+
 # 或者使用 --benchmarks all
-python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --benchmarks all
+python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --benchmarks all --foreground
 
 # 指定部分基准测试
-python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --benchmarks gpqa,mmlu
+python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --benchmarks gpqa,mmlu --foreground
+
+# 仅运行性能测试（不运行基准测试）
+python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --performance_only --foreground
+
+# 运行基准测试 + 性能测试
+python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --benchmarks gpqa --performance --foreground
 
 # 使用 HuggingFace/ModelScope ID（本地不存在则自动下载）
-python3 scripts/eval_model.py --model_path Qwen/Qwen2.5-7B-Instruct
+python3 scripts/eval_model.py --model_path Qwen/Qwen2.5-7B-Instruct --foreground
 
 # 使用本地绝对路径
-python3 scripts/eval_model.py --model_path /workspace/models/Qwen2.5-7B-Instruct
+python3 scripts/eval_model.py --model_path /workspace/models/Qwen2.5-7B-Instruct --foreground
 
 # 指定输出格式
-python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --output markdown
+python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --output markdown --foreground
 ```
 
 ## 后台运行模式
 
-长时间评估任务建议使用 `--daemon` 参数后台运行：
+默认为后台运行模式，长时间评估任务会自动在后台执行：
 
 ```bash
-# 后台运行全部测试
-python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --all --daemon
+# 后台运行全部测试（默认模式）
+python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --all
 ```
 
 启动后会显示：
@@ -73,6 +79,14 @@ PID 文件: /workspace/eval_logs/eval_model.pid
 
 停止任务:
   kill 12345
+```
+
+### 前台运行
+
+如需前台运行（实时查看输出），使用 `--foreground` 参数：
+
+```bash
+python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --all --foreground
 ```
 
 ### 后台任务管理
@@ -114,16 +128,19 @@ python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --model_dir /data/models
 |------|------|--------|------|
 | `--model_path` | 是 | - | 模型路径、ID 或名称（见模型路径解析） |
 | `--model_dir` | 否 | `/workspace/models` | 模型下载目录 |
-| `--benchmarks` | 否 | `gpqa` | 要运行的基准测试，逗号分隔 |
+| `--benchmarks` | 否 | `gpqa` | 要运行的基准测试，逗号分隔。使用 `none` 跳过基准测试 |
 | `--all` | 否 | - | 运行全部基准测试 |
-| `--daemon` | 否 | - | 后台运行模式（守护进程） |
-| `--performance` | 否 | `true` | 是否运行性能测试 |
+| `--foreground` | 否 | - | 前台运行模式（默认后台运行） |
+| `--performance` | 否 | - | 运行性能测试（延迟、吞吐量） |
+| `--performance-only` | 否 | - | 仅运行性能测试，跳过所有基准测试 |
 | `--output` | 否 | `json` | 输出格式：`json` 或 `markdown` |
 | `--report_path` | 否 | 自动生成 | 报告保存路径 |
 | `--port` | 否 | `30000` | SGLang 服务端口 |
 | `--tp` | 否 | `1` | Tensor 并行数 |
 | `--num_examples` | 否 | 见下表 | 各基准测试样本数 |
 | `--thinking_mode` | 否 | - | 推理模式：`qwen3` 或 `deepseek-v3` |
+| `--random_input_len` | 否 | `32000` | 性能测试随机输入长度 |
+| `--random_output_len` | 否 | `500` | 性能测试随机输出长度 |
 
 ### 默认样本数
 
@@ -192,12 +209,41 @@ python3 scripts/eval_model.py --model_path Qwen3.5-0.8B --model_dir /data/models
 | `humaneval` | 准确性 | 代码生成 |
 | `hellaswag` | 准确性 | 常识推理 |
 
+### 单独运行基准测试
+
+```bash
+# 仅运行 GPQA
+python3 scripts/eval_model.py --model_path Qwen3-0.6B --benchmarks gpqa --foreground
+
+# 仅运行 MMLU
+python3 scripts/eval_model.py --model_path Qwen3-0.6B --benchmarks mmlu --foreground
+
+# 仅运行 GSM8K
+python3 scripts/eval_model.py --model_path Qwen3-0.6B --benchmarks gsm8k --foreground
+
+# 运行多个基准测试
+python3 scripts/eval_model.py --model_path Qwen3-0.6B --benchmarks gpqa,mmlu,gsm8k --foreground
+```
+
 ## 性能测试
 
 默认运行两项性能测试：
 
 1. **延迟测试 (TTFT)**: 单请求首 token 延迟
 2. **吞吐量测试**: 高并发下的 tokens/second
+
+### 性能测试示例
+
+```bash
+# 仅运行性能测试（不运行基准测试）
+python3 scripts/eval_model.py --model_path Qwen3-0.6B --performance_only --foreground
+
+# 运行基准测试 + 性能测试
+python3 scripts/eval_model.py --model_path Qwen3-0.6B --benchmarks gpqa --performance --foreground
+
+# 使用 --benchmarks none 跳过基准测试，仅运行性能测试
+python3 scripts/eval_model.py --model_path Qwen3-0.6B --benchmarks none --performance --foreground
+```
 
 ## 推理模型
 
