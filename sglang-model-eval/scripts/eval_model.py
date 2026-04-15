@@ -642,6 +642,9 @@ class BenchmarkRunner:
         qps = self._parse_qps(result)
         output_rate = self._parse_mean_tpot(result)  # 吐字速率 (tokens/s)
 
+        # 解析 TTFT（多并发下的首 Token 延迟）
+        mean_ttft = self._parse_ttft(result)
+
         # 解析新增指标
         total_input_tokens = self._parse_total_input_tokens(result)
         total_output_tokens = self._parse_total_output_tokens(result)
@@ -662,6 +665,7 @@ class BenchmarkRunner:
         log.info(f"[性能] 输出吞吐量: {output_throughput:.2f} tok/s" if output_throughput else "")
         log.info(f"[性能] QPS: {qps:.2f} req/s" if qps else "")
         log.info(f"[性能] 吐字速率: {output_rate:.2f} tok/s" if output_rate else "")
+        log.info(f"[性能] Mean TTFT: {mean_ttft:.2f}ms" if mean_ttft else "")
         log.info(f"[性能] 平均输入 tokens: {avg_input_tokens:.2f}" if avg_input_tokens else "")
         log.info(f"[性能] 平均输出 tokens: {avg_output_tokens:.2f}" if avg_output_tokens else "")
         log.info(f"[性能] Mean E2E Latency: {mean_e2e_latency:.2f}ms" if mean_e2e_latency else "")
@@ -672,6 +676,7 @@ class BenchmarkRunner:
             "output_throughput_tokens_per_sec": output_throughput,
             "qps": qps,
             "output_rate_tokens_per_sec": output_rate,
+            "mean_ttft_ms": mean_ttft,
             "total_input_tokens": total_input_tokens,
             "total_output_tokens": total_output_tokens,
             "successful_requests": successful_requests,
@@ -707,12 +712,18 @@ class BenchmarkRunner:
 
         log.debug(f"基准测试日志文件: {log_file}")
 
+        # 设置环境变量：HuggingFace 镜像源，加速数据集下载
+        env = os.environ.copy()
+        env["HF_ENDPOINT"] = "https://hf-mirror.com"
+        log.debug(f"设置 HF_ENDPOINT={env['HF_ENDPOINT']}")
+
         try:
             # 后台执行命令，输出写入日志文件
             with open(log_file, "w") as f:
                 f.write(f"基准测试: {name}\n")
                 f.write(f"时间: {datetime.now().isoformat()}\n")
                 f.write(f"命令: {' '.join(cmd)}\n")
+                f.write(f"环境变量: HF_ENDPOINT={env['HF_ENDPOINT']}\n")
                 f.write("=" * 60 + "\n\n")
                 f.flush()
 
@@ -720,7 +731,8 @@ class BenchmarkRunner:
                     cmd,
                     stdout=f,
                     stderr=subprocess.STDOUT,
-                    start_new_session=True
+                    start_new_session=True,
+                    env=env,
                 )
 
                 # 等待进程完成
@@ -1318,6 +1330,11 @@ class ModelEvaluator:
                     if output_rate is not None:
                         f.write(f"- **吐字速率**: {output_rate:.2f} tok/s\n")
 
+                    # TTFT
+                    mean_ttft = thr.get("mean_ttft_ms")
+                    if mean_ttft is not None:
+                        f.write(f"- **Mean TTFT**: {mean_ttft:.2f}ms\n")
+
                     # 新增指标
                     avg_input_tokens = thr.get("avg_input_tokens")
                     if avg_input_tokens is not None:
@@ -1342,8 +1359,8 @@ class ModelEvaluator:
                     throughput_multi = perf["throughput_multi"]
 
                     # 汇总表格
-                    f.write("| 并发数 | 总吞吐量 | 输入吞吐量 | 输出吞吐量 | QPS | Mean E2E Latency |\n")
-                    f.write("|--------|----------|------------|------------|-----|------------------|\n")
+                    f.write("| 并发数 | 总吞吐量 | 输入吞吐量 | 输出吞吐量 | QPS | Mean TTFT | Mean E2E Latency |\n")
+                    f.write("|--------|----------|------------|------------|-----|-----------|------------------|\n")
 
                     for key in sorted(throughput_multi.keys()):
                         thr = throughput_multi[key]
@@ -1352,15 +1369,17 @@ class ModelEvaluator:
                         input_tps = thr.get("input_throughput_tokens_per_sec")
                         output_tps = thr.get("output_throughput_tokens_per_sec")
                         qps = thr.get("qps")
+                        mean_ttft = thr.get("mean_ttft_ms")
                         mean_e2e = thr.get("mean_e2e_latency_ms")
 
                         total_str = f"{total_tps:.2f}" if total_tps else "N/A"
                         input_str = f"{input_tps:.2f}" if input_tps else "N/A"
                         output_str = f"{output_tps:.2f}" if output_tps else "N/A"
                         qps_str = f"{qps:.2f}" if qps else "N/A"
+                        ttft_str = f"{mean_ttft:.2f}ms" if mean_ttft else "N/A"
                         e2e_str = f"{mean_e2e:.2f}ms" if mean_e2e else "N/A"
 
-                        f.write(f"| {concurrency} | {total_str} | {input_str} | {output_str} | {qps_str} | {e2e_str} |\n")
+                        f.write(f"| {concurrency} | {total_str} | {input_str} | {output_str} | {qps_str} | {ttft_str} | {e2e_str} |\n")
 
                     f.write("\n")
 
@@ -1369,6 +1388,10 @@ class ModelEvaluator:
                         thr = throughput_multi[key]
                         concurrency = thr.get("concurrency", "N/A")
                         f.write(f"#### 并发 {concurrency} 详细结果\n\n")
+
+                        mean_ttft = thr.get("mean_ttft_ms")
+                        if mean_ttft is not None:
+                            f.write(f"- **Mean TTFT**: {mean_ttft:.2f}ms\n")
 
                         avg_input_tokens = thr.get("avg_input_tokens")
                         if avg_input_tokens is not None:
@@ -1472,6 +1495,9 @@ def _run_as_daemon(args):
 
 
 def main():
+    # 设置 HuggingFace 镜像源，加速数据集下载
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
     parser = argparse.ArgumentParser(
         description="SGLang 模型评估脚本 - 自动化运行基准测试和性能测试",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1667,6 +1693,7 @@ def main():
 
     # 记录评估开始
     log.log_section("SGLang 模型评估")
+    log.info(f"HuggingFace 镜像源: {os.environ.get('HF_ENDPOINT', 'default')}")
     log.info(f"模型输入: {args.model_path if hasattr(args, '_raw_model_path') else args.model_path}")
     log.info(f"模型路径: {args.model_path}")
     log.info(f"基准测试: {args.benchmarks if args.benchmarks else '无'}")
@@ -1718,6 +1745,9 @@ def main():
             output_rate = thr.get("output_rate_tokens_per_sec")
             if output_rate:
                 log.info(f"      吐字速率: {output_rate:.2f} tok/s")
+            mean_ttft = thr.get("mean_ttft_ms")
+            if mean_ttft:
+                log.info(f"      Mean TTFT: {mean_ttft:.2f}ms")
             avg_input_tokens = thr.get("avg_input_tokens")
             if avg_input_tokens:
                 log.info(f"      平均输入 tokens: {avg_input_tokens:.2f}")
@@ -1735,8 +1765,10 @@ def main():
                 concurrency = thr.get("concurrency", "N/A")
                 total_tps = thr.get("total_throughput_tokens_per_sec")
                 qps = thr.get("qps")
+                mean_ttft = thr.get("mean_ttft_ms")
                 mean_e2e = thr.get("mean_e2e_latency_ms")
-                log.info(f"      并发 {concurrency}: 总吞吐量 {total_tps:.2f} tok/s, QPS {qps:.2f} req/s, E2E {mean_e2e:.2f}ms" if total_tps and qps and mean_e2e else f"      并发 {concurrency}: 数据不完整")
+                ttft_str = f", TTFT {mean_ttft:.2f}ms" if mean_ttft else ""
+                log.info(f"      并发 {concurrency}: 总吞吐量 {total_tps:.2f} tok/s, QPS {qps:.2f} req/s{ttft_str}, E2E {mean_e2e:.2f}ms" if total_tps and qps and mean_e2e else f"      并发 {concurrency}: 数据不完整")
 
     if results.get("errors"):
         log.warning(f"\n错误: {len(results['errors'])} 个")
